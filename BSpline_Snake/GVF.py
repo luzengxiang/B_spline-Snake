@@ -5,7 +5,7 @@ import math
 import time
 import sys
 import matplotlib.pyplot as plot
-from collections import deque
+import scipy.stats
 
 class RunTimeError(Exception):
     def __init__(self, value):
@@ -30,6 +30,7 @@ class GVF():
         plot.quiver(X[skip], Y[skip], X_f[skip], Y_f[skip])
         if image is not None:
             plot.imshow(image.transpose(), origin='low', cmap='gray')
+        plot.title("Image_GVF")
         plot.show()
 
     def get_force(self, x, y):
@@ -38,10 +39,10 @@ class GVF():
         V_1 = self.V
 
         row_num, col_num = U_1.shape
-        if x > col_num - 1:
-            x = col_num - 1
-        if y > row_num - 1:
-            y = row_num - 1
+        if x > row_num - 1:
+            x = row_num - 1
+        if y > col_num - 1:
+            y = col_num - 1
 
         x = max(x, 0)
         y = max(y, 0)
@@ -73,8 +74,9 @@ class GVF():
 
 class GVF_generator():
 
-    def __init__(self,gaussian_size=3,gradient_smooth = 3,mu=0.5,dt=0.1,dx=1,dy=1,iter=1e-5):
+    def __init__(self,gaussian_size=3,gradient_smooth = 3,edge_threshold = 0.2,mu=0.5,dt=0.1,dx=1,dy=1,iter=1e-3):
         self.gaussian_size = gaussian_size
+        self.edge_threshold = edge_threshold
         self.mu = mu
 
         self.dx = dx
@@ -91,8 +93,43 @@ class GVF_generator():
 
         self.iter = iter
 
-    def from_gray_image(self,input_image,output_size = None,verbose = True,quiver_visualization = False,
-                        GVF_sparse = 5, second_loop_break_inspect_time= 10):
+    def edge_from_gray_image(self,input_image,output_size = None, visualization = True ):
+        # type checking
+        if not isinstance(input_image, np.ndarray):
+            input_image = np.asarray(input_image)
+
+        if len(input_image.shape) != 2:
+            raise RunTimeError("Input image should be 2 dimension!")
+
+        # image_resize
+        if output_size is not None:
+            output_size = tuple(output_size)
+            if len(output_size) != 2:
+                raise RunTimeError("Output_size should be a tuple (x,y)! ")
+
+            image = cv2.resize(input_image, dsize=tuple(output_size))
+        else:
+            image = input_image
+
+
+        # gradient_magnitude
+        sobelx = cv2.Sobel(image, cv2.CV_64F, 1, 0, ksize=self.gaussian_size)
+        sobely = cv2.Sobel(image, cv2.CV_64F, 0, 1, ksize=self.gaussian_size)
+        gradient_magnitude = np.sqrt(sobelx * sobelx + sobely * sobely)
+        if self.edge_threshold is not None and self.edge_threshold > 0 and self.edge_threshold <1:
+            mean_1 = gradient_magnitude.mean()
+            stderr_1 = math.sqrt(gradient_magnitude.var())
+            lower_bound = mean_1 + stderr_1 * scipy.stats.norm.ppf(self.edge_threshold)
+            gradient_magnitude = np.asarray(gradient_magnitude >lower_bound,dtype=np.float)*gradient_magnitude
+        if visualization:
+            plot.imshow(gradient_magnitude,cmap='gray')
+            plot.title("Edge of Image")
+            plot.show()
+        return gradient_magnitude
+
+    def from_gray_image(self,input_image,output_size = None,verbose = True,verbose_interval = 1,pause_time = 0.0001,
+                        quiver_visualization = False,image = None,
+                        GVF_sparse = 3, second_loop_break_inspect_time= 10,from_edge = False):
 
         ''''
         input_image -- 2d np.ndarray, or convertible
@@ -110,34 +147,25 @@ class GVF_generator():
                     break loop of iteration if Criterion is not increased in latest second_loop_break generation.
                     -1: close 
         '''''
-        # type checking
-        if  not isinstance(input_image,np.ndarray):
-            input_image = np.asarray(input_image)
+        # edge:
 
-        if len(input_image.shape) != 2:
-            raise RunTimeError("Input image should be 2 dimension!")
-
-        #image_resize
-        if output_size is not None:
-            output_size = tuple(output_size)
-            if len(output_size)!= 2:
-                raise RunTimeError("Output_size should be a tuple (x,y)! ")
-
-            image = cv2.resize(input_image, dsize=tuple(output_size))
+        if not from_edge:
+            gradient_magnitude = self.edge_from_gray_image(input_image, output_size=output_size, visualization=False)
         else:
-            image = input_image
+            gradient_magnitude = input_image
+            if output_size is not None:
+                output_size = tuple(output_size)
+                if len(output_size) != 2:
+                    raise RunTimeError("Output_size should be a tuple (w,h)! ")
 
-        #gradient_magnitude
-        sobelx = cv2.Sobel(image, cv2.CV_64F, 1, 0, ksize=self.gaussian_size)
-        sobely = cv2.Sobel(image, cv2.CV_64F, 0, 1, ksize=self.gaussian_size)
-        gradient_magnitude = np.sqrt(sobelx * sobelx + sobely * sobely)
+                gradient_magnitude = cv2.resize(gradient_magnitude, dsize=tuple(output_size))
 
-        #gradient of gradient_magnitude
         p = np.asarray(gradient_magnitude).astype(np.float64)
-        if self.gradient_smooth>0:
+        if self.gradient_smooth is not None and self.gradient_smooth > 0:
             p = ndimage.filters.gaussian_filter(p, self.gradient_smooth)
         sobelx, sobely = np.gradient(p)
 
+        #gradient of gradient_magnitude
         sobelx = np.asarray(sobelx, dtype=np.float64)
         sobely = np.asarray(sobely, dtype=np.float64)
         gradient_magnitude2 = sobelx * sobelx + sobely * sobely
@@ -157,6 +185,21 @@ class GVF_generator():
         break_start_time = time.time()
         break_min = float('inf')
         break_max = float('-inf')
+        plot.ion()
+
+        size_x, size_y = U_1.shape
+        X, Y = np.meshgrid(range(0, size_x), range(0, size_y))
+        skip = (slice(None, None, GVF_sparse), slice(None, None, GVF_sparse))
+
+        if verbose:
+            plot.clf()
+            X_f = U_1[X, Y]
+            Y_f = V_1[X, Y]
+            plot.quiver(X[skip], Y[skip], X_f[skip], Y_f[skip], )
+            plot.title('Criterion:None, threshold: %.2E.' %
+                       self.iter)
+            plot.draw()
+            plot.pause(pause_time)
         while (flag):
             U_Laplacian = cv2.Laplacian(U_1, cv2.CV_64F)
             U_2 = (1 - gradient_magnitude2 * self.dt) * U_1 + r * U_Laplacian + gradient_magnitude2 * sobelx * self.dt
@@ -173,12 +216,14 @@ class GVF_generator():
             U_1 = U_2
             V_1 = V_2
 
+
             flag = (Criterion > self.iter )
+
             if verbose and not flag:
                 sys.stdout.write("GVF Done : First type Termination.\n")
                 sys.stdout.flush()
 
-            if time.time() > verbose_start_time + 10:
+            if time.time() > verbose_start_time + verbose_interval:
                 verbose_start_time = time.time()
                 if (verbose):
 
@@ -187,24 +232,26 @@ class GVF_generator():
                     sys.stdout.write('(mu:%.2f,dt:%.2f,dx:%.2f,dy:%.2f,r:%.2f) \n' %
                                      (self.mu,self.dt,self.dx,self.dy,r))
                     sys.stdout.flush()
-
-            if time.time() > break_start_time + second_loop_break_inspect_time:
-                break_start_time = time.time()
-                flag = flag and break_max/break_min > 2
-                if verbose and break_max/break_min <= 2:
-                    sys.stdout.write("GVF Done : Second type Termination.\n")
-                    sys.stdout.flush()
-                break_min = float('inf')
-                break_max = float('-inf')
-
-        if (quiver_visualization):
-            skip = (slice(None, None, GVF_sparse), slice(None, None, GVF_sparse))
-            size_x , size_y = U_1.shape
-            X, Y = np.meshgrid(range(0, size_x), range(0, size_y))
-            X_f = U_1[X, Y]
-            Y_f = V_1[X, Y]
-            plot.quiver(X[skip], Y[skip], X_f[skip], Y_f[skip], )
-            plot.imshow(image.transpose(), origin='low', cmap='gray')
-            plot.draw()
-
+                    X_f = U_1[X, Y]
+                    Y_f = V_1[X, Y]
+                    plot.clf()
+                    plot.quiver(X[skip], Y[skip], X_f[skip], Y_f[skip], )
+                    plot.title('Criterion:%.2E, threshold: %.2E.' %
+                                     (Criterion,self.iter))
+                    plot.draw()
+                    plot.pause(pause_time)
+            if second_loop_break_inspect_time is not None and second_loop_break_inspect_time>0:
+                if time.time() > break_start_time + second_loop_break_inspect_time:
+                    break_start_time = time.time()
+                    flag = flag and break_max/break_min > 2
+                    if verbose and break_max/break_min <= 2:
+                        sys.stdout.write("GVF Done : Second type Termination.\n")
+                        sys.stdout.flush()
+                        sys.stdout.flush()
+                    break_min = float('inf')
+                    break_max = float('-inf')
+        if verbose:
+            plot.title("Final GVF")
+            plot.ioff()
+            plot.show()
         return GVF(U_1,V_1)

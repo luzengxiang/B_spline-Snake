@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plot
 import BSpline_Snake.GVF as GVF
 import math
+import cv2
 class RunTimeError(Exception):
     def __init__(self, value):
         self.value = value
@@ -103,7 +104,13 @@ class B_spline():
 
 
 
-    def plot_spline(self, show_control_points = True, show_sample_points = True,fq=None,image = None):
+    def plot(self, show_control_points = True, show_sample_points = True,fq=None,image = None,image_resize = None):
+        if image_resize is not None and image is not None:
+                output_size = tuple(image_resize)
+                if len(output_size) != 2:
+                    raise RunTimeError("Output_size should be a tuple (x,y)! ")
+
+                image = cv2.resize(image, dsize=tuple(output_size))
 
         fig = plot.gcf()
         ax = fig.add_subplot(111)
